@@ -26,7 +26,13 @@ struct Player {
 
 #[derive(Component)]
 struct Projectile {
-    has_hit: bool,
+    is_out_of_bounds: bool,
+}
+
+#[derive(Component)]
+struct Obstacle {
+    pos: Vec3,
+    collision_count: i8,
 }
 
 const SHIP_RADIUS: f32 = 30.;
@@ -57,9 +63,13 @@ fn main() {
                 keyboard_input,
                 make_visible,
                 projectile_movement,
+                projectile_obstacle_collision,
             ),
         )
-        .add_systems(FixedUpdate, shoot_projectile)
+        .add_systems(
+            FixedUpdate,
+            (shoot_projectile, projectile_obstacle_collision),
+        )
         .insert_resource(Time::<Fixed>::from_seconds(0.75))
         .run();
 }
@@ -95,6 +105,20 @@ fn setup(
         },
         ..Default::default()
     });
+    commands.spawn((
+        MaterialMesh2dBundle {
+            mesh: Mesh2dHandle(meshes.add(Rectangle {
+                half_size: Vec2::new(6., 20.),
+            })),
+            material: materials.add(color),
+            transform: Transform::from_xyz(window.resolution.width() / 4., 0., 0.),
+            ..default()
+        },
+        Obstacle {
+            pos: Vec3::new(window.resolution.width() / 4., 0., 0.),
+            collision_count: 0,
+        },
+    ));
     commands.spawn((
         MaterialMesh2dBundle {
             mesh: shape,
@@ -191,12 +215,45 @@ fn shoot_projectile(
             ),
             ..default()
         },
-        Projectile { has_hit: false },
+        Projectile {
+            is_out_of_bounds: false,
+        },
     ));
 }
 
-fn projectile_movement(mut projectiles: Query<(&mut Transform, &mut Projectile)>) {
-    for (mut transform, _) in projectiles.iter_mut() {
+fn projectile_movement(
+    mut projectiles: Query<(&mut Transform, &mut Projectile, Entity)>,
+    windows: Query<&Window>,
+    mut commands: Commands,
+) {
+    let window = windows.single();
+
+    for (mut transform, _, entity) in projectiles.iter_mut() {
         transform.translation.x += 10.;
+
+        if transform.translation.x > window.resolution.width() / 2. {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn projectile_obstacle_collision(
+    projectiles: Query<(&Transform, &Projectile, Entity)>,
+    mut obstacles: Query<(&mut Obstacle, Entity)>,
+    mut commands: Commands,
+) {
+    for (transform, _, entity_proj) in projectiles.iter() {
+        for (mut obstacle, entity_obst) in obstacles.iter_mut() {
+            let distance = (obstacle.pos - transform.translation).length();
+
+            if distance < 35. {
+                commands.entity(entity_proj).despawn();
+                obstacle.collision_count += 1;
+
+                if obstacle.collision_count == 4 {
+                    commands.entity(entity_obst).despawn();
+                }
+            }
+        }
     }
 }
