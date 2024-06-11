@@ -1,9 +1,10 @@
-use std::process::exit;
+use std::{process::exit, time::Duration};
 
 use bevy::{
     core::FrameCount,
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
+    time::common_conditions::on_timer,
 };
 
 enum DirectionX {
@@ -26,36 +27,48 @@ struct Player {
 
 #[derive(Component)]
 struct Projectile {
-    is_out_of_bounds: bool,
+    pos: Vec3,
 }
 
 #[derive(Component)]
 struct Obstacle {
     pos: Vec3,
-    collision_count: i8,
 }
 
-const SHIP_RADIUS: f32 = 30.;
+#[derive(Component)]
+struct HealthBar {
+    max_health: f32,
+    current_health: f32,
+}
+
+const SHIP_RADIUS: f32 = 70.;
 const FLIGHT_DISTANCE: f32 = 10.;
+const HP_BAR_FULL_WIDTH: f32 = 20.;
+const PLAYER_MAX_HP: f32 = 8.;
+const NPC_MAX_HP: f32 = 4.;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Rusty Invaders".into(),
-                name: Some("Rusty Invaders.app".into()),
-                resolution: (1920., 1080.).into(),
-                focused: true,
-                visible: false,
-                enabled_buttons: bevy::window::EnabledButtons {
-                    maximize: false,
-                    ..Default::default()
-                },
-                ..default()
-            }),
-            ..default()
-        }))
-        .add_systems(Startup, setup)
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Rusty Invaders".into(),
+                        name: Some("Rusty Invaders.app".into()),
+                        resolution: (1920., 1080.).into(),
+                        focused: true,
+                        visible: false,
+                        enabled_buttons: bevy::window::EnabledButtons {
+                            maximize: false,
+                            ..Default::default()
+                        },
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(ImagePlugin::default_nearest()),
+        )
+        .add_systems(Startup, (setup, spawn_obstacle))
         .add_systems(
             Update,
             (
@@ -64,13 +77,9 @@ fn main() {
                 make_visible,
                 projectile_movement,
                 projectile_obstacle_collision,
+                shoot_projectile.run_if(on_timer(Duration::from_millis(750))),
             ),
         )
-        .add_systems(
-            FixedUpdate,
-            (shoot_projectile, projectile_obstacle_collision),
-        )
-        .insert_resource(Time::<Fixed>::from_seconds(0.75))
         .run();
 }
 
@@ -82,19 +91,28 @@ fn make_visible(mut window: Query<&mut Window>, frames: Res<FrameCount>) {
 
 fn setup(
     windows: Query<&Window>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let window = windows.single();
-    let shape = Mesh2dHandle(meshes.add(Circle {
-        radius: SHIP_RADIUS,
-    }));
-    let color = Color::hex("#ffffff").unwrap_or_else(|err| {
+    let transform_player = Transform {
+        translation: Vec3::new(-window.resolution.width() / 4., 0., 0.),
+        scale: Vec3::new(6.5, 6.5, 6.5),
+        ..Default::default()
+    };
+    let transform_hp_bar = Transform {
+        translation: Vec3::new(0., -10., 0.),
+        scale: Vec3::new(0.15, 0.15, 0.15),
+        ..Default::default()
+    };
+    let color_hp_bar = Color::hex("#FF0000").unwrap_or_else(|err| {
         println!("!! Error: {}", err);
         exit(1);
     });
 
+    // camera
     commands.spawn(Camera2dBundle {
         camera: Camera {
             clear_color: ClearColorConfig::Custom(Color::hex("#000000").unwrap_or_else(|err| {
@@ -105,32 +123,36 @@ fn setup(
         },
         ..Default::default()
     });
-    commands.spawn((
-        MaterialMesh2dBundle {
-            mesh: Mesh2dHandle(meshes.add(Rectangle {
-                half_size: Vec2::new(6., 20.),
-            })),
-            material: materials.add(color),
-            transform: Transform::from_xyz(window.resolution.width() / 4., 0., 0.),
-            ..default()
-        },
-        Obstacle {
-            pos: Vec3::new(window.resolution.width() / 4., 0., 0.),
-            collision_count: 0,
-        },
-    ));
-    commands.spawn((
-        MaterialMesh2dBundle {
-            mesh: shape,
-            material: materials.add(color),
-            transform: Transform::from_xyz(-window.resolution.width() / 4., 0., 0.),
-            ..default()
-        },
-        Player {
-            direction_x: DirectionX::None,
-            direction_y: DirectionY::None,
-        },
-    ));
+
+    // player
+    commands
+        .spawn((
+            SpriteBundle {
+                texture: asset_server.load("Ship.png"),
+                transform: transform_player,
+                ..default()
+            },
+            Player {
+                direction_x: DirectionX::None,
+                direction_y: DirectionY::None,
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                MaterialMesh2dBundle {
+                    mesh: Mesh2dHandle(meshes.add(Rectangle {
+                        half_size: Vec2::new(HP_BAR_FULL_WIDTH * 2., 4.),
+                    })),
+                    material: materials.add(color_hp_bar),
+                    transform: transform_hp_bar,
+                    ..default()
+                },
+                HealthBar {
+                    max_health: PLAYER_MAX_HP,
+                    current_health: PLAYER_MAX_HP,
+                },
+            ));
+        });
 }
 
 fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut player: Query<&mut Player>) {
@@ -216,7 +238,11 @@ fn shoot_projectile(
             ..default()
         },
         Projectile {
-            is_out_of_bounds: false,
+            pos: Vec3::new(
+                transform.translation.x,
+                transform.translation.y,
+                transform.translation.z,
+            ),
         },
     ));
 }
@@ -228,8 +254,9 @@ fn projectile_movement(
 ) {
     let window = windows.single();
 
-    for (mut transform, _, entity) in projectiles.iter_mut() {
+    for (mut transform, mut projectile, entity) in projectiles.iter_mut() {
         transform.translation.x += 10.;
+        projectile.pos = transform.translation;
 
         if transform.translation.x > window.resolution.width() / 2. {
             commands.entity(entity).despawn();
@@ -238,22 +265,79 @@ fn projectile_movement(
 }
 
 fn projectile_obstacle_collision(
-    projectiles: Query<(&Transform, &Projectile, Entity)>,
-    mut obstacles: Query<(&mut Obstacle, Entity)>,
+    projectiles: Query<(&Projectile, Entity)>,
+    mut obstacles: Query<(&mut Obstacle, Entity, &mut Children)>,
+    mut hp_bars: Query<(&mut HealthBar, Entity, &mut Transform)>,
     mut commands: Commands,
 ) {
-    for (transform, _, entity_proj) in projectiles.iter() {
-        for (mut obstacle, entity_obst) in obstacles.iter_mut() {
-            let distance = (obstacle.pos - transform.translation).length();
+    for (projectile, entity_proj) in projectiles.iter() {
+        for (obstacle, entity_obst, children) in obstacles.iter_mut() {
+            let distance = (obstacle.pos - projectile.pos).length();
 
             if distance < 35. {
-                commands.entity(entity_proj).despawn();
-                obstacle.collision_count += 1;
+                for (mut hp_bar, hp_entity, mut transform) in hp_bars.iter_mut() {
+                    if children.get(0) == Some(&hp_entity) {
+                        commands.entity(entity_proj).despawn();
 
-                if obstacle.collision_count == 4 {
-                    commands.entity(entity_obst).despawn();
+                        hp_bar.current_health -= 1.;
+
+                        transform.scale.x = hp_bar.current_health / hp_bar.max_health;
+
+                        if hp_bar.current_health == 0. {
+                            commands.entity(entity_obst).despawn_recursive();
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+fn spawn_obstacle(
+    mut commands: Commands,
+    windows: Query<&Window>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let window = windows.single();
+    let color_obstacle = Color::hex("#ffffff").unwrap_or_else(|err| {
+        println!("!! Error: {}", err);
+        exit(1);
+    });
+
+    let color_hp_bar = Color::hex("#FF0000").unwrap_or_else(|err| {
+        println!("!! Error: {}", err);
+        exit(1);
+    });
+
+    commands
+        .spawn((
+            MaterialMesh2dBundle {
+                mesh: Mesh2dHandle(meshes.add(Rectangle {
+                    half_size: Vec2::new(6., 20.),
+                })),
+                material: materials.add(color_obstacle),
+                transform: Transform::from_xyz(window.resolution.width() / 4., 0., 0.),
+                ..default()
+            },
+            Obstacle {
+                pos: Vec3::new(window.resolution.width() / 4., 0., 0.),
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                MaterialMesh2dBundle {
+                    mesh: Mesh2dHandle(meshes.add(Rectangle {
+                        half_size: Vec2::new(HP_BAR_FULL_WIDTH, 4.),
+                    })),
+                    material: materials.add(color_hp_bar),
+                    transform: Transform::from_xyz(0., -35., 0.),
+                    ..default()
+                },
+                HealthBar {
+                    max_health: NPC_MAX_HP,
+                    current_health: NPC_MAX_HP,
+                },
+            ));
+        });
 }
