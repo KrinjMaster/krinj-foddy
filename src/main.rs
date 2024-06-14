@@ -2,6 +2,7 @@ use rand::{thread_rng, Rng};
 use std::{process::exit, time::Duration};
 
 use bevy::{
+    audio::{PlaybackMode, SpatialScale, Volume},
     core::FrameCount,
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
@@ -23,6 +24,7 @@ enum DirectionY {
 #[derive(Component)]
 struct Player {
     pos: Vec3,
+    is_shooting: bool,
     direction_x: DirectionX,
     direction_y: DirectionY,
 }
@@ -30,11 +32,13 @@ struct Player {
 #[derive(Component)]
 struct Projectile {
     pos: Vec3,
+    is_player_projectile: bool,
 }
 
 #[derive(Component)]
 struct Rocket {
     pos: Vec3,
+    is_shooting: bool,
 }
 
 #[derive(Component)]
@@ -43,11 +47,27 @@ struct HealthBar {
     current_health: f32,
 }
 
-const SHIP_RADIUS: f32 = 70.;
-const FLIGHT_DISTANCE: f32 = 10.;
+// Settings of the game
+//
+//
+// radius of a player ship
+const PLAYER_RADIUS: f32 = 70.;
+// player speed
+const PLAYER_SPEED: f32 = 10.;
+// width of hp bar
 const HP_BAR_FULL_WIDTH: f32 = 20.;
+// player max hp
 const PLAYER_MAX_HP: f32 = 8.;
-const NPC_MAX_HP: f32 = 3.;
+// rocket max hp
+const ROCKET_MAX_HP: f32 = 3.;
+// player projectile cooldown
+const PLAYER_PROJECTILE_CD: u64 = 350;
+// rocket projectile cooldown
+const ROCKET_PROJECTILE_CD: u64 = 3500;
+// can player and rocket projectiles collide
+const IS_PLAYER_ROCKET_PROJECTILES_COLLISION: bool = true;
+// enabling sounds (at your own risk, cuz sound framework is still junky)
+const IS_SOUNDS_ENABLED: bool = false;
 
 fn main() {
     App::new()
@@ -74,18 +94,23 @@ fn main() {
         .add_systems(
             Update,
             (
-                player_movement,
+                make_visible,
                 keyboard_input,
                 update_rocket_pos,
                 update_player_pos,
                 update_projectile_pos,
+                player_movement,
                 rocket_movement,
-                make_visible,
                 projectile_movement,
-                collision_system,
+                rocket_projectile_player_collision_system,
+                player_projectile_rocket_collision_system,
+                player_rocket_projectile_collision,
                 rocket_player_collision_system,
                 spawn_rocket.run_if(on_timer(Duration::from_secs(2))),
-                shoot_projectile.run_if(on_timer(Duration::from_millis(500))),
+                shoot_projectile_player
+                    .run_if(on_timer(Duration::from_millis(PLAYER_PROJECTILE_CD))),
+                shoot_projectile_rocket
+                    .run_if(on_timer(Duration::from_millis(ROCKET_PROJECTILE_CD))),
             ),
         )
         .run();
@@ -142,6 +167,7 @@ fn setup(
             },
             Player {
                 pos: Vec3::new(-window.resolution.width() / 4., 0., 0.),
+                is_shooting: false,
                 direction_x: DirectionX::None,
                 direction_y: DirectionY::None,
             },
@@ -162,6 +188,53 @@ fn setup(
                 },
             ));
         });
+    // game stats
+    //
+    // enemies death count
+    commands.spawn((
+        // Create a TextBundle that has a Text with a single section.
+        TextBundle::from_section(
+            // Accepts a `String` or any type that converts into a `String`, such as `&str`
+            "enemies destroyed: 0",
+            TextStyle {
+                // This font is loaded and will be used instead of the default font.
+                font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
+                font_size: 25.0,
+                ..default()
+            },
+        ) // Set the justification of the Text
+        .with_text_justify(JustifyText::Center)
+        // Set the style of the TextBundle itself.
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
+            right: Val::Px(10.0),
+            ..default()
+        }),
+    ));
+
+    // hp
+    commands.spawn((
+        // Create a TextBundle that has a Text with a single section.
+        TextBundle::from_section(
+            // Accepts a `String` or any type that converts into a `String`, such as `&str`
+            "HP 8/8",
+            TextStyle {
+                // This font is loaded and will be used instead of the default font.
+                font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
+                font_size: 25.0,
+                ..default()
+            },
+        ) // Set the justification of the Text
+        .with_text_justify(JustifyText::Center)
+        // Set the style of the TextBundle itself.
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
+            left: Val::Px(10.0),
+            ..default()
+        }),
+    ));
 }
 
 fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut player: Query<&mut Player>) {
@@ -178,6 +251,9 @@ fn keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut player: Query<&mut Player
         if keys.pressed(KeyCode::KeyD) {
             player.direction_x = DirectionX::Right;
         }
+        if keys.just_pressed(KeyCode::Space) {
+            player.is_shooting = true;
+        }
     }
 }
 
@@ -186,14 +262,15 @@ fn player_movement(mut player: Query<(&mut Transform, &mut Player)>, windows: Qu
     for (mut transform, mut player_info) in player.iter_mut() {
         match player_info.direction_y {
             DirectionY::Up => {
-                if transform.translation.y + SHIP_RADIUS + 10. < window.resolution.height() / 2. {
-                    transform.translation.y += FLIGHT_DISTANCE;
+                if transform.translation.y + PLAYER_RADIUS + 10. < window.resolution.height() / 2. {
+                    transform.translation.y += PLAYER_SPEED;
                     player_info.direction_y = DirectionY::None;
                 };
             }
             DirectionY::Down => {
-                if transform.translation.y - SHIP_RADIUS - 10. > -window.resolution.height() / 2. {
-                    transform.translation.y -= FLIGHT_DISTANCE;
+                if transform.translation.y - PLAYER_RADIUS - 10. > -window.resolution.height() / 2.
+                {
+                    transform.translation.y -= PLAYER_SPEED;
                     player_info.direction_y = DirectionY::None;
                 }
             }
@@ -202,14 +279,14 @@ fn player_movement(mut player: Query<(&mut Transform, &mut Player)>, windows: Qu
 
         match player_info.direction_x {
             DirectionX::Left => {
-                if transform.translation.x - SHIP_RADIUS - 10. > -window.resolution.width() / 2. {
-                    transform.translation.x -= FLIGHT_DISTANCE;
+                if transform.translation.x - PLAYER_RADIUS - 10. > -window.resolution.width() / 2. {
+                    transform.translation.x -= PLAYER_SPEED;
                 }
                 player_info.direction_x = DirectionX::None;
             }
             DirectionX::Right => {
-                if transform.translation.x + SHIP_RADIUS + 10. < 0. {
-                    transform.translation.x += FLIGHT_DISTANCE;
+                if transform.translation.x + PLAYER_RADIUS + 10. < 0. {
+                    transform.translation.x += PLAYER_SPEED;
                 }
                 player_info.direction_x = DirectionX::None;
             }
@@ -218,41 +295,98 @@ fn player_movement(mut player: Query<(&mut Transform, &mut Player)>, windows: Qu
     }
 }
 
-fn shoot_projectile(
-    player: Query<(&Transform, &Player)>,
+fn shoot_projectile_player(
+    mut players: Query<(&mut Transform, &mut Player)>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    for (transform, _) in player.iter() {
-        let shape = Mesh2dHandle(meshes.add(Rectangle {
-            half_size: Vec2::new(12., 4.),
-        }));
+    for (transform, mut player) in players.iter_mut() {
+        if player.is_shooting {
+            let shape = Mesh2dHandle(meshes.add(Rectangle {
+                half_size: Vec2::new(12., 4.),
+            }));
 
-        let color = Color::hex("#ffffff").unwrap_or_else(|err| {
-            println!("!! Error: {}", err);
-            exit(1);
-        });
+            let color = Color::hex("#ffffff").unwrap_or_else(|err| {
+                println!("!! Error: {}", err);
+                exit(1);
+            });
 
-        commands.spawn((
-            MaterialMesh2dBundle {
-                mesh: shape,
-                material: materials.add(color),
-                transform: Transform::from_xyz(
-                    transform.translation.x,
-                    transform.translation.y,
-                    transform.translation.z,
-                ),
-                ..default()
-            },
-            Projectile {
-                pos: Vec3::new(
-                    transform.translation.x,
-                    transform.translation.y,
-                    transform.translation.z,
-                ),
-            },
-        ));
+            commands.spawn((
+                MaterialMesh2dBundle {
+                    mesh: shape,
+                    material: materials.add(color),
+                    transform: Transform::from_xyz(
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ),
+                    ..default()
+                },
+                Projectile {
+                    pos: Vec3::new(
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ),
+                    is_player_projectile: true,
+                },
+            ));
+
+            if IS_SOUNDS_ENABLED {
+                commands.spawn(AudioBundle {
+                    source: asset_server.load("sounds/shoot_player.wav"),
+                    settings: PlaybackSettings {
+                        volume: Volume::new(0.5),
+                        ..Default::default()
+                    },
+                });
+            }
+
+            player.is_shooting = false;
+        }
+    }
+}
+
+fn shoot_projectile_rocket(
+    rockets: Query<(&Transform, &Rocket)>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (transform, rocket) in rockets.iter() {
+        if rocket.is_shooting {
+            let shape = Mesh2dHandle(meshes.add(Rectangle {
+                half_size: Vec2::new(12., 4.),
+            }));
+
+            let color = Color::hex("#ffffff").unwrap_or_else(|err| {
+                println!("!! Error: {}", err);
+                exit(1);
+            });
+
+            commands.spawn((
+                MaterialMesh2dBundle {
+                    mesh: shape,
+                    material: materials.add(color),
+                    transform: Transform::from_xyz(
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ),
+                    ..default()
+                },
+                Projectile {
+                    pos: Vec3::new(
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ),
+                    is_player_projectile: false,
+                },
+            ));
+        }
     }
 }
 
@@ -281,16 +415,24 @@ fn projectile_movement(
 ) {
     let window = windows.single();
 
-    for (mut transform, _, entity) in projectiles.iter_mut() {
-        transform.translation.x += 10.;
+    for (mut transform, projectile, entity) in projectiles.iter_mut() {
+        if projectile.is_player_projectile {
+            transform.translation.x += 10.;
 
-        if transform.translation.x > window.resolution.width() / 2. {
-            commands.entity(entity).despawn();
+            if transform.translation.x > window.resolution.width() / 2. {
+                commands.entity(entity).despawn();
+            }
+        } else {
+            transform.translation.x -= 5.;
+
+            if transform.translation.x < -window.resolution.width() / 2. {
+                commands.entity(entity).despawn();
+            }
         }
     }
 }
 
-fn collision_system(
+fn player_projectile_rocket_collision_system(
     projectiles: Query<(&Projectile, Entity)>,
     mut rockets: Query<(&mut Rocket, Entity, &mut Children)>,
     mut hp_bars: Query<(&mut HealthBar, Entity, &mut Transform)>,
@@ -298,19 +440,52 @@ fn collision_system(
 ) {
     for (projectile, entity_proj) in projectiles.iter() {
         for (rocket, entity_obst, children) in rockets.iter_mut() {
-            let distance = (rocket.pos - projectile.pos).length();
+            if projectile.is_player_projectile {
+                let distance = (rocket.pos - projectile.pos).length();
 
-            if distance < 35. {
-                for (mut hp_bar, hp_entity, mut transform) in hp_bars.iter_mut() {
-                    if children.get(0) == Some(&hp_entity) {
-                        commands.entity(entity_proj).despawn();
+                if distance < 35. {
+                    for (mut hp_bar, hp_entity, mut transform) in hp_bars.iter_mut() {
+                        if children.get(0) == Some(&hp_entity) {
+                            commands.entity(entity_proj).despawn();
 
-                        hp_bar.current_health -= 1.;
+                            hp_bar.current_health -= 1.;
 
-                        transform.scale.x = 0.15 * hp_bar.current_health / hp_bar.max_health;
+                            transform.scale.x = 0.15 * hp_bar.current_health / hp_bar.max_health;
 
-                        if hp_bar.current_health == 0. {
-                            commands.entity(entity_obst).despawn_recursive();
+                            if hp_bar.current_health == 0. {
+                                commands.entity(entity_obst).despawn_recursive();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn rocket_projectile_player_collision_system(
+    projectiles: Query<(&Projectile, Entity)>,
+    mut player: Query<(&mut Player, Entity, &mut Children)>,
+    mut hp_bars: Query<(&mut HealthBar, Entity, &mut Transform)>,
+    mut commands: Commands,
+) {
+    for (projectile, entity_proj) in projectiles.iter() {
+        for (player, entity_pl, children) in player.iter_mut() {
+            if projectile.is_player_projectile == false {
+                let distance = (player.pos - projectile.pos).length();
+
+                if distance < 35. {
+                    for (mut hp_bar, hp_entity, mut transform) in hp_bars.iter_mut() {
+                        if children.get(0) == Some(&hp_entity) {
+                            commands.entity(entity_proj).despawn();
+
+                            hp_bar.current_health -= 1.;
+
+                            transform.scale.x = 0.15 * hp_bar.current_health / hp_bar.max_health;
+
+                            if hp_bar.current_health == 0. {
+                                commands.entity(entity_pl).despawn_recursive();
+                            }
                         }
                     }
                 }
@@ -333,6 +508,7 @@ fn spawn_rocket(
     let max: f32 = 0.75;
 
     let rocket_pos_y = rng.gen_range(min..max) * window.resolution.height() / 2.;
+    let is_shooting = rng.gen_range(0..5) == 3;
 
     let color_hp_bar = Color::hex("#FF0000").unwrap_or_else(|err| {
         println!("!! Error: {}", err);
@@ -358,6 +534,7 @@ fn spawn_rocket(
             },
             Rocket {
                 pos: Vec3::new(window.resolution.width() / 4., 0., 0.),
+                is_shooting,
             },
         ))
         .with_children(|parent| {
@@ -371,8 +548,8 @@ fn spawn_rocket(
                     ..default()
                 },
                 HealthBar {
-                    max_health: NPC_MAX_HP,
-                    current_health: NPC_MAX_HP,
+                    max_health: ROCKET_MAX_HP,
+                    current_health: ROCKET_MAX_HP,
                 },
             ));
         });
@@ -386,7 +563,7 @@ fn rocket_movement(
     let window = windows.single();
 
     for (mut transform, _, entity) in rockets.iter_mut() {
-        transform.translation.x -= 5.;
+        transform.translation.x -= 3.5;
 
         if transform.translation.x < -window.resolution.width() / 2. {
             commands.entity(entity).despawn_recursive();
@@ -417,6 +594,27 @@ fn rocket_player_collision_system(
                             commands.entity(entity_pl).despawn_recursive();
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+fn player_rocket_projectile_collision(
+    projectiles: Query<(&Transform, &Projectile, Entity)>,
+    mut commands: Commands,
+) {
+    if IS_PLAYER_ROCKET_PROJECTILES_COLLISION {
+        let mut iter = projectiles.iter_combinations();
+        while let Some([(transform1, projectile1, entity1), (transform2, projectile2, entity2)]) =
+            iter.fetch_next()
+        {
+            if projectile1.is_player_projectile ^ projectile2.is_player_projectile == true {
+                let distance = (transform1.translation - transform2.translation).length();
+
+                if distance < 35. {
+                    commands.entity(entity1).despawn();
+                    commands.entity(entity2).despawn();
                 }
             }
         }
