@@ -2,7 +2,7 @@ use rand::{thread_rng, Rng};
 use std::{process::exit, time::Duration};
 
 use bevy::{
-    audio::{PlaybackMode, SpatialScale, Volume},
+    audio::Volume,
     core::FrameCount,
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
@@ -19,6 +19,10 @@ enum DirectionY {
     Up,
     Down,
     None,
+}
+
+struct GameState {
+    is_lost: bool
 }
 
 #[derive(Component)]
@@ -46,6 +50,12 @@ struct HealthBar {
     max_health: f32,
     current_health: f32,
 }
+
+#[derive(Component)]
+struct HPText;
+
+#[derive(Component)]
+struct EnemyCountText;
 
 // Settings of the game
 //
@@ -106,6 +116,7 @@ fn main() {
                 player_projectile_rocket_collision_system,
                 player_rocket_projectile_collision,
                 rocket_player_collision_system,
+                update_text_stats.run_if(on_timer(Duration::from_secs(1))),
                 spawn_rocket.run_if(on_timer(Duration::from_secs(2))),
                 shoot_projectile_player
                     .run_if(on_timer(Duration::from_millis(PLAYER_PROJECTILE_CD))),
@@ -192,40 +203,52 @@ fn setup(
     //
     // enemies death count
     commands.spawn((
-        // Create a TextBundle that has a Text with a single section.
         TextBundle::from_section(
-            // Accepts a `String` or any type that converts into a `String`, such as `&str`
             "enemies destroyed: 0",
             TextStyle {
-                // This font is loaded and will be used instead of the default font.
                 font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
                 font_size: 25.0,
                 ..default()
             },
-        ) // Set the justification of the Text
+        )
         .with_text_justify(JustifyText::Center)
-        // Set the style of the TextBundle itself.
         .with_style(Style {
             position_type: PositionType::Absolute,
             bottom: Val::Px(10.0),
             right: Val::Px(10.0),
             ..default()
         }),
+        EnemyCountText,
     ));
 
     // hp
     commands.spawn((
-        // Create a TextBundle that has a Text with a single section.
-        TextBundle::from_section(
-            // Accepts a `String` or any type that converts into a `String`, such as `&str`
-            "HP 8/8",
-            TextStyle {
-                // This font is loaded and will be used instead of the default font.
-                font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
-                font_size: 25.0,
-                ..default()
-            },
-        ) // Set the justification of the Text
+        TextBundle::from_sections([
+            TextSection::new(
+                "HP ",
+                TextStyle {
+                    font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
+                    font_size: 25.0,
+                    ..default()
+                },
+            ),
+            TextSection::new(
+                format!("{}", PLAYER_MAX_HP),
+                TextStyle {
+                    font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
+                    font_size: 25.0,
+                    ..default()
+                },
+            ),
+            TextSection::new(
+                format!("/{}", PLAYER_MAX_HP),
+                TextStyle {
+                    font: asset_server.load("fonts/Quinquefive-ALoRM.ttf"),
+                    font_size: 25.0,
+                    ..default()
+                },
+            ),
+        ])
         .with_text_justify(JustifyText::Center)
         // Set the style of the TextBundle itself.
         .with_style(Style {
@@ -234,6 +257,7 @@ fn setup(
             left: Val::Px(10.0),
             ..default()
         }),
+        HPText,
     ));
 }
 
@@ -484,7 +508,7 @@ fn rocket_projectile_player_collision_system(
                             transform.scale.x = 0.15 * hp_bar.current_health / hp_bar.max_health;
 
                             if hp_bar.current_health == 0. {
-                                commands.entity(entity_pl).despawn_recursive();
+                                commands.entity(entity_pl).();
                             }
                         }
                     }
@@ -615,6 +639,23 @@ fn player_rocket_projectile_collision(
                 if distance < 35. {
                     commands.entity(entity1).despawn();
                     commands.entity(entity2).despawn();
+                }
+            }
+        }
+    }
+}
+
+fn update_text_stats(
+    mut hp_text: Query<&mut Text, With<HPText>>,
+    // mut enemy_count_text: Query<&mut Text, With<EnemyCountText>>,
+    players: Query<(&Player, &Children)>,
+    hp_bars: Query<(&HealthBar, Entity)>,
+) {
+    for (_, children) in players.iter() {
+        for (hp_bar, hp_entity) in hp_bars.iter() {
+            if children.get(0) == Some(&hp_entity) {
+                for mut text in hp_text.iter_mut() {
+                    text.sections[1].value = format!("{}", hp_bar.current_health);
                 }
             }
         }
